@@ -19,7 +19,6 @@ package groupresources
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -27,14 +26,12 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/validation/field"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/klog"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	"k8s.io/kubernetes/pkg/features"
-	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 	framework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
 	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
 )
@@ -58,9 +55,8 @@ type Fit struct {
 	frameworkHandle framework.FrameworkHandle
 	podLister       corelisters.PodLister
 	// key is <namespace>/<PodGroup name> and value is *PodGroupInfo.
-	podGroupInfos         sync.Map
-	ignoredResources      sets.String
-	ignoredResourceGroups sets.String
+	podGroupInfos    sync.Map
+	ignoredResources sets.String
 }
 
 // PodGroupInfo is a wrapper to a PodGroup with additional information.
@@ -96,33 +92,6 @@ func (f *Fit) Name() string {
 	return FitName
 }
 
-func validateFitArgs(args config.NodeResourcesFitArgs) error {
-	var allErrs field.ErrorList
-	resPath := field.NewPath("ignoredResources")
-	for i, res := range args.IgnoredResources {
-		path := resPath.Index(i)
-		if errs := metav1validation.ValidateLabelName(res, path); len(errs) != 0 {
-			allErrs = append(allErrs, errs...)
-		}
-	}
-
-	groupPath := field.NewPath("ignoredResourceGroups")
-	for i, group := range args.IgnoredResourceGroups {
-		path := groupPath.Index(i)
-		if strings.Contains(group, "/") {
-			allErrs = append(allErrs, field.Invalid(path, group, "resource group name can't contain '/'"))
-		}
-		if errs := metav1validation.ValidateLabelName(group, path); len(errs) != 0 {
-			allErrs = append(allErrs, errs...)
-		}
-	}
-
-	if len(allErrs) == 0 {
-		return nil
-	}
-	return allErrs.ToAggregate()
-}
-
 // NewFit initializes a new plugin and returns it.
 func NewFit(plArgs runtime.Object, handle framework.FrameworkHandle) (framework.Plugin, error) {
 	podLister := handle.SharedInformerFactory().Core().V1().Pods().Lister()
@@ -130,14 +99,6 @@ func NewFit(plArgs runtime.Object, handle framework.FrameworkHandle) (framework.
 		podLister: podLister,
 	}, nil
 }
-
-// func getFitArgs(obj runtime.Object) (config.NodeResourcesFitArgs, error) {
-// 	ptr, ok := obj.(*config.NodeResourcesFitArgs)
-// 	if !ok {
-// 		return config.NodeResourcesFitArgs{}, fmt.Errorf("want args to be of type NodeResourcesFitArgs, got %T", obj)
-// 	}
-// 	return *ptr, nil
-// }
 
 // Less is used to sort pods in the scheduling queue.
 // 1. Compare the priorities of Pods.
@@ -279,20 +240,25 @@ func (f *Fit) PreFilter(ctx context.Context, cycleState *framework.CycleState, p
 	if pgInfo.nodeName != "" {
 		return nil
 	}
-	pods := f.getGroupPods(pgInfo.name, pod.Namespace)
+
+	pods, err := f.getGroupPods(pgInfo.name, pod.Namespace)
+	if err != nil {
+		return framework.NewStatus(framework.Unschedulable, "List pods failed")
+	}
+
 	cycleState.Write(preFilterStateKey, computePodResourceRequest(pods))
 	return nil
 }
 
-func (f *Fit) getGroupPods(podGroupName, namespace string) []*v1.Pod {
+func (f *Fit) getGroupPods(podGroupName, namespace string) ([]*v1.Pod, error) {
 	// TODO get the pods from the scheduler cache and queue instead of the hack manner.
 	selector := labels.Set{PodGroupName: podGroupName}.AsSelector()
 	pods, err := f.podLister.Pods(namespace).List(selector)
 	if err != nil {
 		klog.Error(err)
-		return 0
+		return nil, err
 	}
-	return pods
+	return pods, nil
 }
 
 // PreFilterExtensions returns prefilter extensions, pod add and remove.
@@ -333,7 +299,7 @@ func (f *Fit) Filter(ctx context.Context, cycleState *framework.CycleState, pod 
 		return framework.NewStatus(framework.Error, err.Error())
 	}
 
-	insufficientResources := fitsRequest(s, nodeInfo, f.ignoredResources, f.ignoredResourceGroups)
+	insufficientResources := fitsRequest(s, nodeInfo, f.ignoredResources)
 
 	if len(insufficientResources) != 0 {
 		// We will keep all failure reasons.
@@ -357,23 +323,22 @@ type InsufficientResource struct {
 	Capacity  int64
 }
 
-// Fits checks if node have enough resources to host the pod.
-func Fits(pod *v1.Pod, nodeInfo *framework.NodeInfo) []InsufficientResource {
-	return fitsRequest(computePodResourceRequest(pod), nodeInfo, nil, nil)
-}
-
-func fitsRequest(podRequest *preFilterState, nodeInfo *framework.NodeInfo, ignoredExtendedResources, ignoredResourceGroups sets.String) []InsufficientResource {
+func fitsRequest(podRequest *preFilterState, nodeInfo *schedulernodeinfo.NodeInfo, ignoredExtendedResources sets.String) []InsufficientResource {
 	insufficientResources := make([]InsufficientResource, 0, 4)
 
-	allowedPodNumber := nodeInfo.Allocatable.AllowedPodNumber
-	if len(nodeInfo.Pods)+1 > allowedPodNumber {
+	allowedPodNumber := nodeInfo.AllowedPodNumber()
+	if len(nodeInfo.Pods())+1 > allowedPodNumber {
 		insufficientResources = append(insufficientResources, InsufficientResource{
 			v1.ResourcePods,
 			"Too many pods",
 			1,
-			int64(len(nodeInfo.Pods)),
+			int64(len(nodeInfo.Pods())),
 			int64(allowedPodNumber),
 		})
+	}
+
+	if ignoredExtendedResources == nil {
+		ignoredExtendedResources = sets.NewString()
 	}
 
 	if podRequest.MilliCPU == 0 &&
@@ -383,53 +348,50 @@ func fitsRequest(podRequest *preFilterState, nodeInfo *framework.NodeInfo, ignor
 		return insufficientResources
 	}
 
-	if nodeInfo.Allocatable.MilliCPU < podRequest.MilliCPU+nodeInfo.Requested.MilliCPU {
+	allocatable := nodeInfo.AllocatableResource()
+	if allocatable.MilliCPU < podRequest.MilliCPU+nodeInfo.RequestedResource().MilliCPU {
 		insufficientResources = append(insufficientResources, InsufficientResource{
 			v1.ResourceCPU,
 			"Insufficient cpu",
 			podRequest.MilliCPU,
-			nodeInfo.Requested.MilliCPU,
-			nodeInfo.Allocatable.MilliCPU,
+			nodeInfo.RequestedResource().MilliCPU,
+			allocatable.MilliCPU,
 		})
 	}
-	if nodeInfo.Allocatable.Memory < podRequest.Memory+nodeInfo.Requested.Memory {
+	if allocatable.Memory < podRequest.Memory+nodeInfo.RequestedResource().Memory {
 		insufficientResources = append(insufficientResources, InsufficientResource{
 			v1.ResourceMemory,
 			"Insufficient memory",
 			podRequest.Memory,
-			nodeInfo.Requested.Memory,
-			nodeInfo.Allocatable.Memory,
+			nodeInfo.RequestedResource().Memory,
+			allocatable.Memory,
 		})
 	}
-	if nodeInfo.Allocatable.EphemeralStorage < podRequest.EphemeralStorage+nodeInfo.Requested.EphemeralStorage {
+	if allocatable.EphemeralStorage < podRequest.EphemeralStorage+nodeInfo.RequestedResource().EphemeralStorage {
 		insufficientResources = append(insufficientResources, InsufficientResource{
 			v1.ResourceEphemeralStorage,
 			"Insufficient ephemeral-storage",
 			podRequest.EphemeralStorage,
-			nodeInfo.Requested.EphemeralStorage,
-			nodeInfo.Allocatable.EphemeralStorage,
+			nodeInfo.RequestedResource().EphemeralStorage,
+			allocatable.EphemeralStorage,
 		})
 	}
 
 	for rName, rQuant := range podRequest.ScalarResources {
 		if v1helper.IsExtendedResourceName(rName) {
-			// If this resource is one of the extended resources that should be ignored, we will skip checking it.
-			// rName is guaranteed to have a slash due to API validation.
-			var rNamePrefix string
-			if ignoredResourceGroups.Len() > 0 {
-				rNamePrefix = strings.Split(string(rName), "/")[0]
-			}
-			if ignoredExtendedResources.Has(string(rName)) || ignoredResourceGroups.Has(rNamePrefix) {
+			// If this resource is one of the extended resources that should be
+			// ignored, we will skip checking it.
+			if ignoredExtendedResources.Has(string(rName)) {
 				continue
 			}
 		}
-		if nodeInfo.Allocatable.ScalarResources[rName] < rQuant+nodeInfo.Requested.ScalarResources[rName] {
+		if allocatable.ScalarResources[rName] < rQuant+nodeInfo.RequestedResource().ScalarResources[rName] {
 			insufficientResources = append(insufficientResources, InsufficientResource{
 				rName,
 				fmt.Sprintf("Insufficient %v", rName),
 				podRequest.ScalarResources[rName],
-				nodeInfo.Requested.ScalarResources[rName],
-				nodeInfo.Allocatable.ScalarResources[rName],
+				nodeInfo.RequestedResource().ScalarResources[rName],
+				allocatable.ScalarResources[rName],
 			})
 		}
 	}
