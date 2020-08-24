@@ -14,6 +14,8 @@
 
 COMMONENVVAR=GOOS=$(shell uname -s | tr A-Z a-z) GOARCH=$(subst x86_64,amd64,$(patsubst i%86,386,$(shell uname -m)))
 BUILDENVVAR=CGO_ENABLED=0
+# If tag not explicitly set in users default to the git sha.
+TAG ?= v0.0.1
 
 .PHONY: all
 all: build
@@ -45,3 +47,7 @@ integration-test: install-etcd autogen
 .PHONY: verify-gofmt
 verify-gofmt:
 	hack/verify-gofmt.sh
+
+.PHONY: image
+image: build
+	docker build  . -t vincentpli/scheduler-framework-sample:$(TAG)
