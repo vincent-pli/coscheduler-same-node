@@ -71,10 +71,10 @@ type PodGroupInfo struct {
 	// priority is the priority of pods in a PodGroup.
 	// All pods in a PodGroup should have the same priority.
 	priority int32
-	// nodename stores the node name of pods will bind.
-	nodeName string
 	// timestamp stores the initialization timestamp of a PodGroup.
 	timestamp time.Time
+	// nodename stores the node name of pods will bind.
+	nodeName string
 }
 
 // preFilterState computed at PreFilter and used at Filter.
@@ -127,9 +127,7 @@ func (f *Fit) Less(podInfo1, podInfo2 *framework.PodInfo) bool {
 
 // getOrCreatePodGroupInfo returns the existing PodGroup in PodGroupInfos if present.
 // Otherwise, it creates a PodGroup and returns the value, It stores
-// the created PodGroup in PodGroupInfo if the pod defines a  PodGroup and its
-// PodGroupMinAvailable is greater than one. It also returns the pod's
-// PodGroupMinAvailable (0 if not specified).
+// the created PodGroup in PodGroupInfo if the pod defines a PodGroup.
 func (f *Fit) getOrCreatePodGroupInfo(pod *v1.Pod, ts time.Time) *PodGroupInfo {
 	podGroupName, _ := getPodGroupLabels(pod)
 
@@ -203,21 +201,26 @@ func getPodGroupLabels(pod *v1.Pod) (string, error) {
 // Result: CPU: 3, Memory: 3G
 func computePodResourceRequest(pods []*v1.Pod) *preFilterState {
 	result := &preFilterState{}
+	resultInitContiner := schedulernodeinfo.Resource{}
 	for _, pod := range pods {
+		tempResultInitContiner := schedulernodeinfo.Resource{}
+
 		for _, container := range pod.Spec.Containers {
 			result.Add(container.Resources.Requests)
 		}
 
 		// take max_resource(sum_pod, any_init_container)
 		for _, container := range pod.Spec.InitContainers {
-			result.SetMaxResource(container.Resources.Requests)
+			tempResultInitContiner.SetMaxResource(container.Resources.Requests)
 		}
-
+		resultInitContiner.Add(tempResultInitContiner.ResourceList())
 		// If Overhead is being utilized, add to the total requests for the pod
 		if pod.Spec.Overhead != nil && utilfeature.DefaultFeatureGate.Enabled(features.PodOverhead) {
 			result.Add(pod.Spec.Overhead)
 		}
 	}
+	result.SetMaxResource(resultInitContiner.ResourceList())
+
 	return result
 }
 
@@ -238,7 +241,7 @@ func (f *Fit) PreFilter(ctx context.Context, cycleState *framework.CycleState, p
 	}
 
 	if pgInfo.nodeName != "" {
-		return nil
+		return framework.NewStatus(framework.Success, "")
 	}
 
 	pods, err := f.getGroupPods(pgInfo.name, pod.Namespace)
@@ -247,7 +250,7 @@ func (f *Fit) PreFilter(ctx context.Context, cycleState *framework.CycleState, p
 	}
 
 	cycleState.Write(preFilterStateKey, computePodResourceRequest(pods))
-	return nil
+	return framework.NewStatus(framework.Success, "")
 }
 
 func (f *Fit) getGroupPods(podGroupName, namespace string) ([]*v1.Pod, error) {
@@ -309,6 +312,8 @@ func (f *Fit) Filter(ctx context.Context, cycleState *framework.CycleState, pod 
 		}
 		return framework.NewStatus(framework.Unschedulable, failureReasons...)
 	}
+
+	pgInfo.nodeName = nodeInfo.Node().Name
 	return nil
 }
 
