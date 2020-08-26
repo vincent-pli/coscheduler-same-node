@@ -93,7 +93,7 @@ func (f *Fit) Name() string {
 }
 
 // NewFit initializes a new plugin and returns it.
-func NewFit(plArgs runtime.Object, handle framework.FrameworkHandle) (framework.Plugin, error) {
+func NewFit(_ *runtime.Unknown, handle framework.FrameworkHandle) (framework.Plugin, error) {
 	podLister := handle.SharedInformerFactory().Core().V1().Pods().Lister()
 	return &Fit{frameworkHandle: handle,
 		podLister: podLister,

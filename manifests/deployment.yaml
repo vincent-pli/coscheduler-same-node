@@ -15,15 +15,15 @@ data:
     plugins:
       queueSort:
         enabled:
-        - name: Fit
+        - name: GroupNodeResourcesFit
         disabled:
         - name: "*"
       preFilter:
         enabled:
-        - name: Fit
+        - name: GroupNodeResourcesFit
       filter:
         enabled:
-        - name: Fit
+        - name: GroupNodeResourcesFit
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -50,10 +50,10 @@ spec:
           name: scheduler-config
       containers:
       - name: scheduler-ctrl
-        image: index.docker.io/vincentpli/scheduler-framework-sample:v0.0.1
+        image: index.docker.io/vincentpli/scheduler-framework-sample:V0.0.2
         imagePullPolicy: IfNotPresent
         args:
-        - scheduler-framework-sample
+        - kube-scheduler
         - --config=/scheduler/scheduler-config.yaml
         - --v=3
         resources:

@@ -23,7 +23,7 @@ import (
 
 	"k8s.io/kubernetes/cmd/kube-scheduler/app"
 
-	"sigs.k8s.io/scheduler-plugins/pkg/coscheduling"
+	"sigs.k8s.io/scheduler-plugins/pkg/groupresources"
 )
 
 func main() {
@@ -32,7 +32,7 @@ func main() {
 	// Later they can consist of scheduler profile(s) and hence
 	// used by various kinds of workloads.
 	command := app.NewSchedulerCommand(
-		app.WithPlugin(coscheduling.Name, coscheduling.New),
+		app.WithPlugin(groupresources.FitName, groupresources.NewFit),
 	)
 	if err := command.Execute(); err != nil {
 		os.Exit(1)
