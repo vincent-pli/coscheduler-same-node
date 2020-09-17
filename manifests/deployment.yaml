@@ -24,6 +24,9 @@ data:
       filter:
         enabled:
         - name: GroupNodeResourcesFit
+      postBind:
+        enabled:
+        - name: GroupNodeResourcesFit
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -50,8 +53,8 @@ spec:
           name: scheduler-config
       containers:
       - name: scheduler-ctrl
-        image: index.docker.io/vincentpli/scheduler-framework-sample:V0.0.2
-        imagePullPolicy: IfNotPresent
+        image: index.docker.io/vincentpli/scheduler-framework-sample:v0.0.1
+        imagePullPolicy: Always
         args:
         - kube-scheduler
         - --config=/scheduler/scheduler-config.yaml

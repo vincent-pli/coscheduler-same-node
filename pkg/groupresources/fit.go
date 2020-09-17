@@ -19,6 +19,7 @@ package groupresources
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -39,12 +40,15 @@ import (
 var _ framework.QueueSortPlugin = &Fit{}
 var _ framework.PreFilterPlugin = &Fit{}
 var _ framework.FilterPlugin = &Fit{}
+var _ framework.PostBindPlugin = &Fit{}
 
 const (
 	// FitName is the name of the plugin used in the plugin registry and configurations.
 	FitName = "GroupNodeResourcesFit"
 	// PodGroupName is the name of a pod group that defines a one node pod group.
 	PodGroupName = "pod-group.scheduling.sigs.k8s.io/name"
+	// PodGroupTotal is the number of pod in the pod group
+	PodGroupTotal = "pod-group.scheduling.sigs.k8s.io/total"
 	// preFilterStateKey is the key in CycleState to GroupNodeResourcesFit pre-computed data.
 	// Using the name of the plugin will likely help us avoid collisions with other plugins.
 	preFilterStateKey = "PreFilter" + FitName
@@ -75,6 +79,10 @@ type PodGroupInfo struct {
 	timestamp time.Time
 	// nodename stores the node name of pods will bind.
 	nodeName string
+	// total is the total number of pod in this pod group.
+	total int
+	// count is the count of pod which has been permit, when reach total, the pod group will be removed.
+	count int
 }
 
 // preFilterState computed at PreFilter and used at Filter.
@@ -129,10 +137,10 @@ func (f *Fit) Less(podInfo1, podInfo2 *framework.PodInfo) bool {
 // Otherwise, it creates a PodGroup and returns the value, It stores
 // the created PodGroup in PodGroupInfo if the pod defines a PodGroup.
 func (f *Fit) getOrCreatePodGroupInfo(pod *v1.Pod, ts time.Time) *PodGroupInfo {
-	podGroupName, _ := getPodGroupLabels(pod)
+	podGroupName, podGroupTotal, _ := getPodGroupLabels(pod)
 
 	var pgKey string
-	if len(podGroupName) > 0 {
+	if len(podGroupName) > 0 && podGroupTotal > 0 {
 		pgKey = fmt.Sprintf("%v/%v", pod.Namespace, podGroupName)
 	}
 
@@ -152,6 +160,8 @@ func (f *Fit) getOrCreatePodGroupInfo(pod *v1.Pod, ts time.Time) *PodGroupInfo {
 		priority:  podutil.GetPodPriority(pod),
 		timestamp: ts,
 		nodeName:  "",
+		total:     podGroupTotal,
+		count:     0,
 	}
 
 	// If it's not a regular Pod, store the PodGroup in PodGroupInfos
@@ -163,13 +173,71 @@ func (f *Fit) getOrCreatePodGroupInfo(pod *v1.Pod, ts time.Time) *PodGroupInfo {
 
 // getPodGroupLabels checks if the pod belongs to a PodGroup. If so, it will return the
 // podGroupName of the PodGroup. If not, it will return "".
-func getPodGroupLabels(pod *v1.Pod) (string, error) {
+func getPodGroupLabels(pod *v1.Pod) (string, int, error) {
 	podGroupName, exist := pod.Labels[PodGroupName]
 	if !exist || len(podGroupName) == 0 {
-		return "", nil
+		return "", 0, nil
 	}
 
-	return podGroupName, nil
+	podGroupTotal, exist := pod.Labels[PodGroupTotal]
+	if !exist || len(podGroupTotal) == 0 {
+		return "", 0, nil
+	}
+
+	total, err := strconv.Atoi(podGroupTotal)
+	if err != nil {
+		klog.Errorf("PodGroup %v/%v : PodGroupTotal %v is invalid", pod.Namespace, pod.Name, total)
+		return "", 0, err
+	}
+	if total < 1 {
+		klog.Errorf("PodGroup %v/%v : PodGroupTotal %v is less than 1", pod.Namespace, pod.Name, total)
+		return "", 0, err
+	}
+	return podGroupName, total, nil
+}
+
+// PreFilter invoked at the prefilter extension point.
+func (f *Fit) PreFilter(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod) *framework.Status {
+	pgInfo := f.getOrCreatePodGroupInfo(pod, time.Now())
+	pgKey := pgInfo.key
+	if len(pgKey) == 0 {
+		return framework.NewStatus(framework.Success, "")
+	}
+
+	// Check if the priorities are the same.
+	pgPriority := pgInfo.priority
+	podPriority := podutil.GetPodPriority(pod)
+	if pgPriority != podPriority {
+		klog.V(3).Infof("Pod %v has a different priority (%v) as the PodGroup %v (%v)", pod.Name, podPriority, pgKey, pgPriority)
+		return framework.NewStatus(framework.Unschedulable, "Priorities do not match")
+	}
+	fmt.Println("================")
+	fmt.Println(pgInfo.nodeName)
+	if pgInfo.nodeName != "" {
+		return framework.NewStatus(framework.Success, "")
+	}
+
+	// time.Sleep(time.Duration(5) * time.Second)
+	pods, err := f.getGroupPods(pgInfo.name, pod.Namespace)
+	fmt.Println("++++++++++++++++++++++++")
+	fmt.Printf("-------- %+v", len(pods))
+	fmt.Println(pgInfo.total)
+	fmt.Println("")
+	if len(pods) < pgInfo.total {
+		klog.V(3).Infof("Count of pod: %v not equeal to total: %v in PodGroup %v", len(pods), pgInfo.total, pgKey)
+		return framework.NewStatus(framework.Unschedulable, "Count of pod not match total")
+	}
+
+	for _, pod := range pods {
+		fmt.Println(pod.GetName())
+	}
+
+	if err != nil || len(pods) == 0 {
+		return framework.NewStatus(framework.Unschedulable, "List pods failed")
+	}
+
+	cycleState.Write(preFilterStateKey, computePodResourceRequest(pods))
+	return framework.NewStatus(framework.Success, "")
 }
 
 // computePodResourceRequest returns a framework.Resource that covers the largest
@@ -208,7 +276,9 @@ func computePodResourceRequest(pods []*v1.Pod) *preFilterState {
 		for _, container := range pod.Spec.Containers {
 			result.Add(container.Resources.Requests)
 		}
-
+		fmt.Println("~~~~~~~~~~~~~~~")
+		fmt.Printf("----%v", result)
+		fmt.Println("")
 		// take max_resource(sum_pod, any_init_container)
 		for _, container := range pod.Spec.InitContainers {
 			tempResultInitContiner.SetMaxResource(container.Resources.Requests)
@@ -222,35 +292,6 @@ func computePodResourceRequest(pods []*v1.Pod) *preFilterState {
 	result.SetMaxResource(resultInitContiner.ResourceList())
 
 	return result
-}
-
-// PreFilter invoked at the prefilter extension point.
-func (f *Fit) PreFilter(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod) *framework.Status {
-	pgInfo := f.getOrCreatePodGroupInfo(pod, time.Now())
-	pgKey := pgInfo.key
-	if len(pgKey) == 0 {
-		return framework.NewStatus(framework.Success, "")
-	}
-
-	// Check if the priorities are the same.
-	pgPriority := pgInfo.priority
-	podPriority := podutil.GetPodPriority(pod)
-	if pgPriority != podPriority {
-		klog.V(3).Infof("Pod %v has a different priority (%v) as the PodGroup %v (%v)", pod.Name, podPriority, pgKey, pgPriority)
-		return framework.NewStatus(framework.Unschedulable, "Priorities do not match")
-	}
-
-	if pgInfo.nodeName != "" {
-		return framework.NewStatus(framework.Success, "")
-	}
-
-	pods, err := f.getGroupPods(pgInfo.name, pod.Namespace)
-	if err != nil {
-		return framework.NewStatus(framework.Unschedulable, "List pods failed")
-	}
-
-	cycleState.Write(preFilterStateKey, computePodResourceRequest(pods))
-	return framework.NewStatus(framework.Success, "")
 }
 
 func (f *Fit) getGroupPods(podGroupName, namespace string) ([]*v1.Pod, error) {
@@ -298,6 +339,8 @@ func (f *Fit) Filter(ctx context.Context, cycleState *framework.CycleState, pod 
 	}
 
 	s, err := getPreFilterState(cycleState)
+	fmt.Printf("----------- %+v", s)
+	fmt.Println("")
 	if err != nil {
 		return framework.NewStatus(framework.Error, err.Error())
 	}
@@ -315,6 +358,10 @@ func (f *Fit) Filter(ctx context.Context, cycleState *framework.CycleState, pod 
 
 	pgInfo.nodeName = nodeInfo.Node().Name
 	return nil
+}
+
+func countRemovePodGroup() {
+
 }
 
 // InsufficientResource describes what kind of resource limit is hit and caused the pod to not fit the node.
@@ -402,4 +449,20 @@ func fitsRequest(podRequest *preFilterState, nodeInfo *schedulernodeinfo.NodeInf
 	}
 
 	return insufficientResources
+}
+
+// PostBind is to clear Pginfo when every pod in the group is binded.
+func (f *Fit) PostBind(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) {
+	pgInfo := f.getOrCreatePodGroupInfo(pod, time.Now())
+	pgKey := pgInfo.key
+	if len(pgKey) == 0 {
+		return
+	}
+
+	if pgInfo.nodeName == nodeName {
+		pgInfo.count++
+		if pgInfo.count == pgInfo.total {
+			f.podGroupInfos.Delete(pgKey)
+		}
+	}
 }
