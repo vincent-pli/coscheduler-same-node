@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
@@ -103,9 +104,34 @@ func (f *Fit) Name() string {
 // NewFit initializes a new plugin and returns it.
 func NewFit(_ *runtime.Unknown, handle framework.FrameworkHandle) (framework.Plugin, error) {
 	podLister := handle.SharedInformerFactory().Core().V1().Pods().Lister()
-	return &Fit{frameworkHandle: handle,
+
+	f := &Fit{frameworkHandle: handle,
 		podLister: podLister,
-	}, nil
+	}
+
+	podInformer := handle.SharedInformerFactory().Core().V1().Pods().Informer()
+	podInformer.AddEventHandler(
+		cache.FilteringResourceEventHandler{
+			FilterFunc: func(obj interface{}) bool {
+				switch t := obj.(type) {
+				case *v1.Pod:
+					return responsibleForPod(t)
+				case cache.DeletedFinalStateUnknown:
+					if pod, ok := t.Obj.(*v1.Pod); ok {
+						return responsibleForPod(pod)
+					}
+					return false
+				default:
+					return false
+				}
+			},
+			Handler: cache.ResourceEventHandlerFuncs{
+				DeleteFunc: f.deletePodGroup,
+			},
+		},
+	)
+
+	return f, nil
 }
 
 // Less is used to sort pods in the scheduling queue.
@@ -223,7 +249,7 @@ func (f *Fit) PreFilter(ctx context.Context, cycleState *framework.CycleState, p
 	fmt.Printf("-------- %+v", len(pods))
 	fmt.Println(pgInfo.total)
 	fmt.Println("")
-	if len(pods) < pgInfo.total {
+	if len(pods) != pgInfo.total {
 		klog.V(3).Infof("Count of pod: %v not equeal to total: %v in PodGroup %v", len(pods), pgInfo.total, pgKey)
 		return framework.NewStatus(framework.Unschedulable, "Count of pod not match total")
 	}
@@ -465,4 +491,31 @@ func (f *Fit) PostBind(ctx context.Context, state *framework.CycleState, pod *v1
 			f.podGroupInfos.Delete(pgKey)
 		}
 	}
+}
+
+// responsibleForPod selects pod that belongs to a PodGroup.
+func responsibleForPod(pod *v1.Pod) bool {
+	podGroupName, podGroupTotal, _ := getPodGroupLabels(pod)
+	if len(podGroupName) == 0 || podGroupTotal == 0 {
+		return false
+	}
+	return true
+}
+
+// markPodGroupAsExpired set the deletionTimestamp of PodGroup to mark PodGroup as expired.
+func (f *Fit) deletePodGroup(obj interface{}) {
+	pod := obj.(*v1.Pod)
+	podGroupName, podGroupTotal, _ := getPodGroupLabels(pod)
+	if len(podGroupName) == 0 || podGroupTotal == 0 {
+		return
+	}
+
+	pgKey := fmt.Sprintf("%v/%v", pod.Namespace, podGroupName)
+	// If it's a PodGroup and present in PodGroupInfos, set its deletionTimestamp.
+	_, exist := f.podGroupInfos.Load(pgKey)
+	if !exist {
+		return
+	}
+
+	f.podGroupInfos.Delete(pgKey)
 }
