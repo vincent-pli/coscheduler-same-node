@@ -139,8 +139,8 @@ func NewFit(_ *runtime.Unknown, handle framework.FrameworkHandle) (framework.Plu
 // 2. Compare the initialization timestamps of PodGroups/Pods.
 // 3. Compare the keys of PodGroups/Pods, i.e., if two pods are tied at priority and creation time, the one without podGroup will go ahead of the one with podGroup.
 func (f *Fit) Less(podInfo1, podInfo2 *framework.PodInfo) bool {
-	pgInfo1 := f.getOrCreatePodGroupInfo(podInfo1.Pod, podInfo1.InitialAttemptTimestamp)
-	pgInfo2 := f.getOrCreatePodGroupInfo(podInfo2.Pod, podInfo2.InitialAttemptTimestamp)
+	pgInfo1, _ := f.getOrCreatePodGroupInfo(podInfo1.Pod, podInfo1.InitialAttemptTimestamp)
+	pgInfo2, _ := f.getOrCreatePodGroupInfo(podInfo2.Pod, podInfo2.InitialAttemptTimestamp)
 
 	priority1 := pgInfo1.priority
 	priority2 := pgInfo2.priority
@@ -162,7 +162,7 @@ func (f *Fit) Less(podInfo1, podInfo2 *framework.PodInfo) bool {
 // getOrCreatePodGroupInfo returns the existing PodGroup in PodGroupInfos if present.
 // Otherwise, it creates a PodGroup and returns the value, It stores
 // the created PodGroup in PodGroupInfo if the pod defines a PodGroup.
-func (f *Fit) getOrCreatePodGroupInfo(pod *v1.Pod, ts time.Time) *PodGroupInfo {
+func (f *Fit) getOrCreatePodGroupInfo(pod *v1.Pod, ts time.Time) (*PodGroupInfo, int) {
 	podGroupName, podGroupTotal, _ := getPodGroupLabels(pod)
 
 	var pgKey string
@@ -174,7 +174,7 @@ func (f *Fit) getOrCreatePodGroupInfo(pod *v1.Pod, ts time.Time) *PodGroupInfo {
 	if len(pgKey) != 0 {
 		pgInfo, exist := f.podGroupInfos.Load(pgKey)
 		if exist {
-			return pgInfo.(*PodGroupInfo)
+			return pgInfo.(*PodGroupInfo), podGroupTotal
 		}
 	}
 
@@ -194,7 +194,7 @@ func (f *Fit) getOrCreatePodGroupInfo(pod *v1.Pod, ts time.Time) *PodGroupInfo {
 	if len(pgKey) > 0 {
 		f.podGroupInfos.Store(pgKey, pgInfo)
 	}
-	return pgInfo
+	return pgInfo, podGroupTotal
 }
 
 // getPodGroupLabels checks if the pod belongs to a PodGroup. If so, it will return the
@@ -224,7 +224,7 @@ func getPodGroupLabels(pod *v1.Pod) (string, int, error) {
 
 // PreFilter invoked at the prefilter extension point.
 func (f *Fit) PreFilter(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod) *framework.Status {
-	pgInfo := f.getOrCreatePodGroupInfo(pod, time.Now())
+	pgInfo, podTotal := f.getOrCreatePodGroupInfo(pod, time.Now())
 	pgKey := pgInfo.key
 	if len(pgKey) == 0 {
 		return framework.NewStatus(framework.Success, "")
@@ -237,25 +237,23 @@ func (f *Fit) PreFilter(ctx context.Context, cycleState *framework.CycleState, p
 		klog.V(3).Infof("Pod %v has a different priority (%v) as the PodGroup %v (%v)", pod.Name, podPriority, pgKey, pgPriority)
 		return framework.NewStatus(framework.Unschedulable, "Priorities do not match")
 	}
-	fmt.Println("================")
-	fmt.Println(pgInfo.nodeName)
+
+	// Check if the total are the same.
+	pgTotal := pgInfo.total
+	if podTotal != pgTotal {
+		klog.V(3).Infof("Pod %v has a different total (%v) as the PodGroup %v (%v)", pod.Name, podTotal, pgKey, pgTotal)
+		return framework.NewStatus(framework.Unschedulable, "Total do not match")
+	}
+
 	if pgInfo.nodeName != "" {
 		return framework.NewStatus(framework.Success, "")
 	}
 
 	// time.Sleep(time.Duration(5) * time.Second)
 	pods, err := f.getGroupPods(pgInfo.name, pod.Namespace)
-	fmt.Println("++++++++++++++++++++++++")
-	fmt.Printf("-------- %+v", len(pods))
-	fmt.Println(pgInfo.total)
-	fmt.Println("")
 	if len(pods) != pgInfo.total {
 		klog.V(3).Infof("Count of pod: %v not equeal to total: %v in PodGroup %v", len(pods), pgInfo.total, pgKey)
 		return framework.NewStatus(framework.Unschedulable, "Count of pod not match total")
-	}
-
-	for _, pod := range pods {
-		fmt.Println(pod.GetName())
 	}
 
 	if err != nil || len(pods) == 0 {
@@ -302,9 +300,7 @@ func computePodResourceRequest(pods []*v1.Pod) *preFilterState {
 		for _, container := range pod.Spec.Containers {
 			result.Add(container.Resources.Requests)
 		}
-		fmt.Println("~~~~~~~~~~~~~~~")
-		fmt.Printf("----%v", result)
-		fmt.Println("")
+
 		// take max_resource(sum_pod, any_init_container)
 		for _, container := range pod.Spec.InitContainers {
 			tempResultInitContiner.SetMaxResource(container.Resources.Requests)
@@ -354,7 +350,7 @@ func getPreFilterState(cycleState *framework.CycleState) (*preFilterState, error
 // Checks if a node has sufficient resources, such as cpu, memory, gpu, opaque int resources etc to run a pod.
 // It returns a list of insufficient resources, if empty, then the node has all the resources requested by the pod.
 func (f *Fit) Filter(ctx context.Context, cycleState *framework.CycleState, pod *v1.Pod, nodeInfo *schedulernodeinfo.NodeInfo) *framework.Status {
-	pgInfo := f.getOrCreatePodGroupInfo(pod, time.Now())
+	pgInfo, _ := f.getOrCreatePodGroupInfo(pod, time.Now())
 	pgKey := pgInfo.key
 	if len(pgKey) == 0 {
 		return framework.NewStatus(framework.Success, "")
@@ -479,7 +475,7 @@ func fitsRequest(podRequest *preFilterState, nodeInfo *schedulernodeinfo.NodeInf
 
 // PostBind is to clear Pginfo when every pod in the group is binded.
 func (f *Fit) PostBind(ctx context.Context, state *framework.CycleState, pod *v1.Pod, nodeName string) {
-	pgInfo := f.getOrCreatePodGroupInfo(pod, time.Now())
+	pgInfo, _ := f.getOrCreatePodGroupInfo(pod, time.Now())
 	pgKey := pgInfo.key
 	if len(pgKey) == 0 {
 		return

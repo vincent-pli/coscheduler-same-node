@@ -766,6 +766,7 @@ k8s.io/kubectl v0.18.0/go.mod h1:LOkWx9Z5DXMEg5KtOjHhRiC1fqJPLyCr3KtQgEolCkU=
 k8s.io/kubelet v0.18.0/go.mod h1:1VULM2m7c/ePlIeNOVVK+kkprayDr1RPf1T8oaNaHuQ=
 k8s.io/kubernetes v1.18.0 h1:rVe+edi5GwutPQJ4KIZq1Nk506nmnfyz/KOZVCLv7Yo=
 k8s.io/kubernetes v1.18.0/go.mod h1:z8xjOOO1Ljz+TaHpOxVGC7cxtF32TesIamoQ+BZrVS0=
+k8s.io/kubernetes v1.19.2 h1:sEvBYVM1/H5hqejFR10u8ndreYARV3DiTrqi2AY31ok=
 k8s.io/legacy-cloud-providers v0.18.0/go.mod h1:4Bc9CdZg8wl0mskyhnaXa8DdqLpTUfPEMkw3FZok+H8=
 k8s.io/metrics v0.18.0/go.mod h1:8aYTW18koXqjLVKL7Ds05RPMX9ipJZI3mywYvBOxXd4=
 k8s.io/repo-infra v0.0.1-alpha.1/go.mod h1:wO1t9WaB99V80ljbeENTnayuEEwNZt7gECYh/CEyOJ8=
