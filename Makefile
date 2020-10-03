@@ -32,17 +32,9 @@ update-vendor:
 unit-test: update-vendor
 	hack/unit-test.sh
 
-.PHONY: install-etcd
-install-etcd:
-	hack/install-etcd.sh
-
 .PHONY: autogen
 autogen: update-vendor
 	hack/update-generated-openapi.sh
-
-.PHONY: integration-test
-integration-test: install-etcd autogen
-	hack/integration-test.sh
 
 .PHONY: verify-gofmt
 verify-gofmt:
