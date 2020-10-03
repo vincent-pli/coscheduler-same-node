@@ -15,18 +15,18 @@ data:
     plugins:
       queueSort:
         enabled:
-        - name: GroupNodeResourcesFit
+        - name: CoschedulerSamenode
         disabled:
         - name: "*"
       preFilter:
         enabled:
-        - name: GroupNodeResourcesFit
+        - name: CoschedulerSamenode
       filter:
         enabled:
-        - name: GroupNodeResourcesFit
+        - name: CoschedulerSamenode
       postBind:
         enabled:
-        - name: GroupNodeResourcesFit
+        - name: CoschedulerSamenode
 ---
 apiVersion: apps/v1
 kind: Deployment
