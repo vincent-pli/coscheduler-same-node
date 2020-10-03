@@ -9,7 +9,7 @@ docker push
 ```
 
 # Take a try
-`kubectl manifests/sample/pods.yaml`
+`kubectl create -f manifests/sample/pods.yaml`
 
 # Description
 The `scheduler` is based on [Scheduler plugin framework](https://github.com/kubernetes/enhancements/blob/master/keps/sig-scheduling/20180409-scheduling-framework.md)
