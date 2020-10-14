@@ -6,6 +6,7 @@ https://github.com/tektoncd/pipeline/issues/3052
 ```
 make image
 docker push
+kubectl apply -f manifests/
 ```
 
 # Take a try
